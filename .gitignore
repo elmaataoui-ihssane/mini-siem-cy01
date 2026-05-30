@@ -1,0 +1,20 @@
+# Secrets — NEVER commit these
+.env
+*.env
+secrets.json
+credentials.json
+
+# n8n workflow exports with real credentials
+workflow_real.json
+workflow_with_secrets.json
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Editor
+.vscode/
+.idea/
+
+# Logs
+*.log

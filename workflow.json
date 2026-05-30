@@ -1,0 +1,560 @@
+{
+  "name": "WORKFLOW FIXEDDD",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "d37f5b0c-6ee2-4a71-a588-accb42d85458",
+        "responseMode": "lastNode",
+        "options": {}
+      },
+      "id": "9d9d22e6-a1c5-4c9d-abfb-cb0d654c0174",
+      "name": "Webhook \u2014 R\u00e9ception Logs",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 1,
+      "position": [
+        -896,
+        272
+      ],
+      "webhookId": "d37f5b0c-6ee2-4a71-a588-accb42d85458",
+      "notes": "Point d'entr\u00e9e du workflow. Re\u00e7oit les logs SIEM au format JSON. Chaque log doit contenir : ip_source, event_type (auth_fail | port_scan | privilege_escalation | normal), timestamp."
+    },
+    {
+      "parameters": {
+        "jsCode": "// ============================================================\n// CODE NODE \u2014 Moteur AFD + Compteurs temporels\n// Mini-SIEM CY-01 | ENSAM Casablanca 2025-2026\n// ============================================================\n\nconst NOW = Date.now();\n\nconst PARAMS = {\n  Nauth:  3,\n  Wauth:  5  * 60 * 1000,\n  Treset: 15 * 60 * 1000,\n};\n\n// --- Lecture du log depuis le Webhook ---\nconst inputData = $('Webhook \u2014 R\u00e9ception Logs').first();\nlet log = inputData.json || inputData.body || inputData;\nif (log && log.body && typeof log.body === 'object') log = log.body;\nif (typeof log === 'string') { try { log = JSON.parse(log); } catch(e) {} }\n\nconst ip        = log?.ip_source || log?.ipSource || log?.ip || log?.source_ip;\nconst eventType = log?.event_type || log?.eventType || log?.type;\n\nif (!ip || !eventType) {\n  throw new Error('Log invalide : ip_source et event_type sont obligatoires.');\n}\n\n// --- R\u00e9cup\u00e9ration du DERNIER \u00e9tat valide depuis Google Sheets ---\nlet prevState      = 'q0';\nlet authFailCount  = 0;\nlet stateEnteredAt = NOW;\n\ntry {\n  const allRows = $('Get row(s) in sheet').all();\n  console.log('Nombre total de lignes:', allRows.length);\n\n  // Filtrer par IP et lignes valides\n  const validRows = allRows.filter(r =>\n    r.json &&\n    r.json.ip_source === ip &&\n    r.json.state_after &&\n    r.json.state_after.trim() !== ''\n  );\n\n  console.log('Lignes valides pour IP', ip, ':', validRows.length);\n\n  if (validRows.length > 0) {\n    const lastRow = validRows[validRows.length - 1].json;\n    console.log('DERNIERE LIGNE:', JSON.stringify(lastRow));\n\n    prevState      = lastRow.state_after || 'q0';\n    authFailCount  = parseInt(lastRow.auth_fail_count) || 0;\n    stateEnteredAt = parseInt(lastRow.stateEnteredAt) || NOW;\n  }\n} catch(e) {\n  console.log('Pas de donn\u00e9es pr\u00e9c\u00e9dentes:', e.message);\n}\n\n// --- Timeout ---\nconst timeInState = NOW - stateEnteredAt;\nif (timeInState > PARAMS.Treset && prevState !== 'q0' && prevState !== 'q3') {\n  prevState      = 'q0';\n  authFailCount  = 0;\n  stateEnteredAt = NOW;\n}\n\n// --- Traduction log \u2192 symbole AFD ---\nlet symbol = 'n';\nif (eventType === 'auth_fail') {\n  authFailCount++;\n  console.log('AUTH FAIL COUNT:', authFailCount, '/ Nauth:', PARAMS.Nauth);\n  if (authFailCount >= PARAMS.Nauth) symbol = 'b';\n} else if (eventType === 'port_scan' || eventType === 'nmap_scan') {\n  symbol = 's';\n  authFailCount = 0;\n} else if (eventType === 'privilege_escalation' || eventType === 'sudo' || eventType === 'su_root') {\n  symbol = 'p';\n} else if (eventType === 'alert_ack' || eventType === 'reset') {\n  symbol = 'r';\n  authFailCount = 0;\n}\n\n// --- Table de transition \u03b4 ---\nconst DELTA = {\n  q0: { b:'q1', s:'q0', p:'q0', n:'q0', r:'q0' },\n  q1: { b:'q1', s:'q2', p:'q1', n:'q1', r:'q1' },\n  q2: { b:'q2', s:'q2', p:'q3', n:'q2', r:'q2' },\n  q3: { b:'q3', s:'q3', p:'q3', n:'q3', r:'q0' },\n};\n\nconst nextState         = DELTA[prevState]?.[symbol] || prevState;\nconst newStateEnteredAt = nextState !== prevState ? NOW : stateEnteredAt;\n\n// --- Labels ---\nconst STATE_LABELS = { q0:'Calme', q1:'Suspect', q2:'Attaque_En_Cours', q3:'Compromis' };\n\nconsole.log('TRANSITION:', prevState, '--[' + symbol + ']--> ', nextState);\n\nreturn [{\n  json: {\n    ip_source:       ip,\n    event_type:      eventType,\n    symbol:          symbol,\n    state_before:    prevState,\n    state_after:     nextState,\n    current_label:   STATE_LABELS[nextState],\n    auth_fail_count: authFailCount,\n    is_alert:        nextState === 'q3' && prevState !== 'q3',\n    is_q3:           nextState === 'q3',\n    stateEnteredAt:  newStateEnteredAt,\n    timestamp:       new Date(NOW).toISOString(),\n  }\n}];"
+      },
+      "id": "edccb6fe-367d-4b1d-86a9-5d96794e47ad",
+      "name": "Code \u2014 Moteur AFD + Compteurs",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -400,
+        272
+      ],
+      "notes": "C\u0153ur du workflow. Impl\u00e9mente la fonction de transition \u03b4, les compteurs temporels et les gardes. G\u00e8re le contexte par IP via staticData."
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 1
+          },
+          "conditions": [
+            {
+              "id": "cond_alert",
+              "leftValue": "={{ $json.is_alert }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "b1a2b390-fa37-475a-8e3f-1a1c635d652b",
+      "name": "IF \u2014 Alerte q3 ?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        112,
+        272
+      ],
+      "notes": "V\u00e9rifie si l'\u00e9tat q3 (Compromis) vient d'\u00eatre atteint. TRUE \u2192 branche alerte. FALSE \u2192 Switch de routage."
+    },
+    {
+      "parameters": {
+        "rules": {
+          "values": [
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 1
+                },
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.state_after }}",
+                    "rightValue": "q1",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "Suspect"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 1
+                },
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.state_after }}",
+                    "rightValue": "q2",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "Attaque_En_Cours"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 1
+                },
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.state_after }}",
+                    "rightValue": "q0",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "Calme"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "68decb5e-2315-4567-9d58-8bdd4b304caa",
+      "name": "Switch \u2014 \u00c9tat AFD",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3,
+      "position": [
+        96,
+        560
+      ],
+      "notes": "Routage selon l'\u00e9tat courant. q0\u2192Calme (log simple), q1\u2192Suspect (log enrichi), q2\u2192Attaque_En_Cours (log enrichi + pr\u00e9-alerte Slack)."
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ { \"status\": \"processed\", \"state\": $json.state_after, \"ip\": $json.ip_source } }}",
+        "options": {}
+      },
+      "id": "cb460b13-f05f-48bc-bd36-7a64f4e66f89",
+      "name": "Webhook Response",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [
+        720,
+        272
+      ],
+      "notes": "Retourne la r\u00e9ponse JSON au syst\u00e8me qui a envoy\u00e9 le log. Confirme la r\u00e9ception et l'\u00e9tat AFD courant."
+    },
+    {
+      "parameters": {
+        "jsCode": "// ============================================================\n// CODE NODE \u2014 Reset AFD (q3 \u2192 q0)\n// Mini-SIEM CY-01 | ENSAM Casablanca 2025-2026\n// ============================================================\n\nconst NOW = Date.now();\n\n// --- 1. Lecture robuste de l'IP (M\u00eame logique que le n\u0153ud principal) ---\nconst inputData = $input.first();\nlet log = inputData.json || inputData.body || inputData;\n\n// Si n8n encapsule dans .body, on descend d'un niveau\nif (log && log.body && typeof log.body === 'object') {\n    log = log.body;\n}\n\nconst ip = log?.ip_source || log?.ipSource || log?.ip || log?.source_ip;\n\nif (!ip) {\n    throw new Error(\"Impossible de r\u00e9initialiser : 'ip_source' est manquant dans l'entr\u00e9e.\");\n}\n\n// --- 2. Acc\u00e8s robuste \u00e0 la m\u00e9moire (StaticData ou Global) ---\nconst stateStore = (typeof $workflow !== 'undefined' && $workflow && $workflow.staticData)\n  ? $workflow.staticData\n  : (typeof globalThis !== 'undefined' \n      ? (globalThis.__miniSiemState = globalThis.__miniSiemState || {}) \n      : {});\n\n// --- 3. Logique de r\u00e9initialisation (Symbole 'r') ---\nif (stateStore.ipContexts && stateStore.ipContexts[ip]) {\n    const ctx = stateStore.ipContexts[ip];\n    \n    const prevState = ctx.state;\n    ctx.state = 'q0';\n    ctx.authFailTimes = [];\n    ctx.stateEnteredAt = NOW;\n    \n    // Ajout \u00e0 l'historique pour tra\u00e7abilit\u00e9 SOC\n    ctx.eventHistory.push({ \n        time: NOW, \n        event: 'r', \n        from: prevState, \n        to: 'q0', \n        reason: 'Alerte acquitt\u00e9e par SOC (Reset)' \n    });\n\n    // Sauvegarde\n    stateStore.ipContexts[ip] = ctx;\n}\n\n// --- 4. Sortie pour le Webhook Response ---\nreturn [{ \n    json: { \n        status: 'reset', \n        ip_source: ip, \n        state_before: 'q3',\n        state_after: 'q0',\n        message: 'AFD r\u00e9initialis\u00e9 \u00e0 q0. Syst\u00e8me en mode Calme.' \n    } \n}];"
+      },
+      "id": "88cdb539-f3f3-4921-b9c9-393a85199fb4",
+      "name": "Code \u2014 Reset q3 \u2192 q0 (apr\u00e8s alerte)",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        0,
+        0
+      ],
+      "notes": "Impl\u00e9mente \u03b4(q3, r) = q0. \u00c0 d\u00e9clencher manuellement ou via webhook d'acquittement SOC apr\u00e8s que l'alerte a \u00e9t\u00e9 trait\u00e9e."
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://hooks.slack.com/services/YOUR_SLACK_WEBHOOK_TOKEN",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"channel\": \"C0B1D3B1DUL\",\n  \"text\": \"\ud83d\udea8 *SIEM ALERT: COMPROMIS D\u00c9TECT\u00c9* \ud83d\udea8\\n*IP:* {{ $json.ip_source }}\\n*Transition:* {{ $json.state_before }} \u2794 {{ $json.state_after }}\\n*Label:* {{ $json.current_label }}\"\n}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        384,
+        176
+      ],
+      "id": "2b9e8b58-60f1-4f16-a96d-72cce9ec4e4e",
+      "name": "HTTP Request"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.twilio.com/2010-04-01/Accounts/YOUR_TWILIO_ACCOUNT_SID/Messages.json",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpBasicAuth",
+        "sendBody": true,
+        "contentType": "form-urlencoded",
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "From",
+              "value": "whatsapp:+14155238886"
+            },
+            {
+              "name": "To",
+              "value": "whatsapp:+YOUR_ANALYST_WHATSAPP_NUMBER"
+            },
+            {
+              "name": "Body",
+              "value": "\ud83d\udea8 ALERTE SOC \u2014 IP Compromise ! \u00c9tat AFD : q3 COMPROMIS. Action imm\u00e9diate requise."
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        384,
+        320
+      ],
+      "id": "1342c5d2-1d5c-40f1-a64e-b01e87bb388a",
+      "name": "HTTP Request1",
+      "credentials": {
+        "httpBasicAuth": {
+          "id": "d48IFedADtP16VpV",
+          "name": "Unnamed credential"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "documentId": {
+          "__rl": true,
+          "value": "YOUR_GOOGLE_SHEETS_ID",
+          "mode": "list",
+          "cachedResultName": " SIEM-State-Store-f",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/YOUR_GOOGLE_SHEETS_ID/edit?usp=drivesdk"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "gid=0",
+          "mode": "list",
+          "cachedResultName": "Feuille 1",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/YOUR_GOOGLE_SHEETS_ID/edit#gid=0"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.7,
+      "position": [
+        -688,
+        272
+      ],
+      "id": "0692eb13-c326-4142-baa7-f7f5144b6c7b",
+      "name": "Get row(s) in sheet",
+      "alwaysOutputData": true,
+      "retryOnFail": true,
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "pGWQMKO7osgMSdwM",
+          "name": "Google Sheets account"
+        }
+      },
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "operation": "append",
+        "documentId": {
+          "__rl": true,
+          "value": "YOUR_GOOGLE_SHEETS_ID",
+          "mode": "list",
+          "cachedResultName": " SIEM-State-Store-f",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/YOUR_GOOGLE_SHEETS_ID/edit?usp=drivesdk"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "gid=0",
+          "mode": "list",
+          "cachedResultName": "Feuille 1",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/YOUR_GOOGLE_SHEETS_ID/edit#gid=0"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "ip_source": "={{ $json.ip_source }}",
+            "event_type": "={{ $json.event_type }}",
+            "symbol": "={{ $json.symbol }}",
+            "state_after": "={{ $json.state_after }}",
+            "state_before": "={{ $json.state_before}}",
+            "current_label": "={{ $json.current_label}}",
+            "auth_fail_count": "={{ $json.auth_fail_count }}",
+            "is_alert": "={{ $json.is_alert }}",
+            "timestamp": "={{ $json.timestamp}}"
+          },
+          "matchingColumns": [
+            "ip_source"
+          ],
+          "schema": [
+            {
+              "id": "ip_source",
+              "displayName": "ip_source",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "event_type",
+              "displayName": "event_type",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "symbol",
+              "displayName": "symbol",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "state_before",
+              "displayName": "state_before",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "state_after",
+              "displayName": "state_after",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "current_label",
+              "displayName": "current_label",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "auth_fail_count",
+              "displayName": "auth_fail_count",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "is_alert",
+              "displayName": "is_alert",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "timestamp",
+              "displayName": "timestamp",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.7,
+      "position": [
+        -192,
+        272
+      ],
+      "id": "aab50522-80e4-48fa-973b-6dd927a4813f",
+      "name": "Append row in sheet",
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "pGWQMKO7osgMSdwM",
+          "name": "Google Sheets account"
+        }
+      }
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Webhook \u2014 R\u00e9ception Logs": {
+      "main": [
+        [
+          {
+            "node": "Get row(s) in sheet",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Code \u2014 Moteur AFD + Compteurs": {
+      "main": [
+        [
+          {
+            "node": "Append row in sheet",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "IF \u2014 Alerte q3 ?": {
+      "main": [
+        [
+          {
+            "node": "HTTP Request",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "HTTP Request1",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Switch \u2014 \u00c9tat AFD",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Switch \u2014 \u00c9tat AFD": {
+      "main": [
+        [
+          {
+            "node": "Webhook Response",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Webhook Response",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Webhook Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Code \u2014 Reset q3 \u2192 q0 (apr\u00e8s alerte)": {
+      "main": [
+        [
+          {
+            "node": "Webhook Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "HTTP Request": {
+      "main": [
+        [
+          {
+            "node": "Webhook Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "HTTP Request1": {
+      "main": [
+        [
+          {
+            "node": "Webhook Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get row(s) in sheet": {
+      "main": [
+        [
+          {
+            "node": "Code \u2014 Moteur AFD + Compteurs",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Append row in sheet": {
+      "main": [
+        [
+          {
+            "node": "IF \u2014 Alerte q3 ?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate"
+  },
+  "versionId": "72624380-26eb-4ef3-88a2-40f491557582",
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": "YOUR_TWILIO_AUTH_TOKENYOUR_TWILIO_AUTH_TOKEN_2"
+  },
+  "id": "HYfFdoXJzkJffugw",
+  "tags": []
+}
